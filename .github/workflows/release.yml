@@ -1,0 +1,74 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify tag and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${GITHUB_REF_NAME#v}"
+          actual="$(go run ./cmd/fileencrypt version 2>&1 | awk '{print $2}')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match CLI version $actual."
+            exit 1
+          fi
+          go test ./...
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          build_archive() {
+            local goos="$1"
+            local goarch="$2"
+            local package="fileencrypt_${version}_${goos}_${goarch}"
+
+            mkdir -p "dist/${package}/docs"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags="-s -w" \
+              -o "dist/${package}/fileencrypt" ./cmd/fileencrypt
+            cp README.md LICENSE THIRD_PARTY_NOTICES.md "dist/${package}/"
+            cp docs/README.zh-CN.md "dist/${package}/docs/"
+            tar -C dist -czf "dist/${package}.tar.gz" "$package"
+            rm -rf "dist/${package}"
+          }
+
+          build_archive darwin amd64
+          build_archive darwin arm64
+          build_archive linux amd64
+          build_archive linux arm64
+
+          cd dist
+          sha256sum ./*.tar.gz > checksums.txt
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/checksums.txt
